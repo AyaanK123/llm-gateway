@@ -1,0 +1,70 @@
+# Ports bind to 127.0.0.1 only: this is a dev stack, nothing here should face a network.
+services:
+  gateway:
+    build: .
+    env_file: .env
+    environment:
+      GATEWAY_ENABLE_FAKE: "1"       # dev only: loads the chaos provider + chaos aliases
+    ports: ["127.0.0.1:8000:8000"]
+    volumes:
+      - ./config:/app/config:ro      # edit YAML on host, `make reload` picks it up
+      - ./app:/app/app               # live code reload in dev
+      - ./migrations:/app/migrations:ro
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    extra_hosts: ["host.docker.internal:host-gateway"]   # reach Ollama on host
+    command: sh -c "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  redis:
+    image: redis:8.10.2-alpine
+    ports: ["127.0.0.1:6379:6379"]
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, retries: 10 }
+
+  postgres:
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      POSTGRES_DB: gateway
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql]   # PG18+: data lives in /var/lib/postgresql/<major>/docker
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U gateway"], interval: 5s, retries: 10 }
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/prometheus-rules.yml:/etc/prometheus/rules.yml:ro
+    ports: ["127.0.0.1:9090:9090"]
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    ports: ["127.0.0.1:3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GRAFANA_PG_USER: gateway          # dev only: use a read-only role in production
+      GRAFANA_PG_PASSWORD: gateway
+      # Dashboard screenshots (docs): `docker compose --profile screenshots up -d renderer`
+      # Renderer runs only with `--profile screenshots`; without it, image export just fails.
+      GF_RENDERING_SERVER_URL: http://renderer:8081/render
+      GF_RENDERING_CALLBACK_URL: http://grafana:3000/
+      # Grafana refuses to start with the renderer's default token; both sides share this.
+      GF_RENDERING_RENDERER_TOKEN: ${GRAFANA_RENDERER_TOKEN:-dev-only-renderer-token}
+    volumes:
+      - grafana:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus: { condition: service_started }
+      postgres: { condition: service_healthy }
+
+  renderer:   # Grafana's image renderer — only for docs screenshots
+    image: grafana/grafana-image-renderer:v5.12.5
+    profiles: ["screenshots"]
+    environment:
+      AUTH_TOKEN: ${GRAFANA_RENDERER_TOKEN:-dev-only-renderer-token}
+
+volumes:
+  pgdata:
+  grafana:
